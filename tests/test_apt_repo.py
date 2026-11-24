@@ -18,12 +18,15 @@
 #    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #
 
-from breezy.tests import TestCase
+import os
+import tempfile
+
+from breezy.tests import TestCase, TestCaseInTempDir
 
 from debian.deb822 import Dsc
 
 
-from ..apt_repo import LocalApt, NoAptSources
+from ..apt_repo import LocalApt, NoAptSources, RemoteApt
 
 
 class MockSources:
@@ -200,3 +203,49 @@ class LocalAptTests(TestCase):
             ],
             list(src.iter_source_by_name("apackage")),
         )
+
+
+class RemoteAptTests(TestCaseInTempDir):
+    def setUp(self):
+        super().setUp()
+        os.mkdir("tmp")
+        self.overrideAttr(tempfile, "tempdir", os.path.abspath("tmp"))
+
+    def make_repository(self):
+        import apt_pkg
+
+        apt_pkg.init()
+        arch = apt_pkg.config.find("APT::Architecture")
+        self.build_tree_contents(
+            [
+                ("repo/",),
+                ("repo/dists/",),
+                ("repo/dists/sid/",),
+                (
+                    "repo/dists/sid/Release",
+                    b"Suite: sid\nDate: Thu, 01 Jan 2026 00:00:00 UTC\nComponents: main\n",
+                ),
+                ("repo/dists/sid/main/",),
+                (f"repo/dists/sid/main/binary-{arch}/",),
+                (f"repo/dists/sid/main/binary-{arch}/Packages", b""),
+                ("repo/dists/sid/main/source/",),
+                ("repo/dists/sid/main/source/Sources", b""),
+            ]
+        )
+        return "file://" + os.path.abspath("repo")
+
+    def test_nested_enter_keeps_one_root(self):
+        remote = RemoteApt(self.make_repository(), "sid", ["main"])
+        with remote:
+            rootdir = remote._rootdir
+            with remote:
+                self.assertEqual(rootdir, remote._rootdir)
+            self.assertTrue(os.path.isdir(rootdir))
+        self.assertEqual([], os.listdir("tmp"))
+
+    def test_failed_enter_removes_root(self):
+        from apt.cache import FetchFailedException
+
+        remote = RemoteApt("file://" + os.path.abspath("missing"), "sid", ["main"])
+        self.assertRaises(FetchFailedException, remote.__enter__)
+        self.assertEqual([], os.listdir("tmp"))
